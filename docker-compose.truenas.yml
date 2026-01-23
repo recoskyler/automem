@@ -1,0 +1,75 @@
+# docker-compose.truenas.yml - TrueNAS Scale 25.04 deployment
+#
+# This compose file uses pre-built images from GHCR instead of build context,
+# making it compatible with TrueNAS Scale Custom Apps.
+#
+# Usage:
+#   1. In TrueNAS: Apps > Discover Apps > Custom App > Install via YAML
+#   2. Paste this file contents or reference it
+#   3. Configure environment variables via TrueNAS UI
+#   4. Map volumes to datasets for persistence
+#
+# Recommended TrueNAS storage mappings:
+#   - falkordb_data  -> /mnt/pool/apps/automem/falkordb
+#   - qdrant_data    -> /mnt/pool/apps/automem/qdrant
+#   - fastembed_models -> /mnt/pool/apps/automem/models
+
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: automem-falkordb
+    ports:
+      - "6379:6379"
+    volumes:
+      - falkordb_data:/data
+    environment:
+      - REDIS_ARGS=--save 60 1 --appendonly yes --appendfsync everysec --dir /data
+      - REDIS_PASSWORD=${FALKORDB_PASSWORD:-}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.11.3
+    container_name: automem-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  api:
+    image: ghcr.io/recoskyler/automem:latest
+    container_name: automem-api
+    ports:
+      - "8001:8001"
+    environment:
+      # Core service connections
+      - FALKORDB_HOST=falkordb
+      - FALKORDB_PORT=6379
+      - FALKORDB_PASSWORD=${FALKORDB_PASSWORD:-}
+      - QDRANT_URL=http://qdrant:6333
+      # Use local embeddings (no OpenAI API key required)
+      - EMBEDDING_PROVIDER=local
+      - AUTOMEM_MODELS_DIR=/root/.config/automem/models
+      # API authentication (set via TrueNAS UI environment variables)
+      - AUTOMEM_API_TOKEN=${AUTOMEM_API_TOKEN:-}
+      - ADMIN_API_TOKEN=${ADMIN_API_TOKEN:-}
+      # Optional: OpenAI for higher quality embeddings
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      - fastembed_models:/root/.config/automem/models
+    depends_on:
+      falkordb:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  falkordb_data:
+  qdrant_data:
+  fastembed_models:
