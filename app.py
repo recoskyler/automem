@@ -250,6 +250,7 @@ def _result_passes_filters(
     tag_filters: Optional[List[str]] = None,
     tag_mode: str = "any",
     tag_match: str = "prefix",
+    exclude_tags: Optional[List[str]] = None,
 ) -> bool:
     memory = result.get("memory", {}) or {}
     timestamp = memory.get("timestamp")
@@ -319,6 +320,30 @@ def _result_passes_filters(
                 else:
                     if not _tags_start_with():
                         return False
+
+    # Apply exclude_tags filter - exclude if ANY excluded tag matches
+    if exclude_tags:
+        normalized_exclude = _prepare_tag_filters(exclude_tags)
+        if normalized_exclude:
+            tags = memory.get("tags") or []
+            lowered_tags = [
+                str(tag).strip().lower()
+                for tag in tags
+                if isinstance(tag, str) and str(tag).strip()
+            ]
+
+            # Check exact matches first
+            tag_set = set(lowered_tags)
+            if any(exclude_tag in tag_set for exclude_tag in normalized_exclude):
+                return False
+
+            # Check prefix matches
+            if any(
+                tag.startswith(exclude_tag)
+                for exclude_tag in normalized_exclude
+                for tag in lowered_tags
+            ):
+                return False
 
     return True
 
@@ -785,13 +810,13 @@ Return JSON with: {"type": "<type>", "confidence": <0.0-1.0>}"""
             return None
 
         try:
-            # Use appropriate token parameter based on model family
-            if CLASSIFICATION_MODEL.startswith("o"):  # o-series (o1, o3, etc.)
-                token_param = {"max_completion_tokens": 50}
-            elif CLASSIFICATION_MODEL.startswith("gpt-5"):  # gpt-5 family
-                token_param = {"max_output_tokens": 50}
-            else:  # gpt-4o-mini, gpt-4, etc.
-                token_param = {"max_tokens": 50}
+            # Build model-specific params (o-series and gpt-5 don't support temperature)
+            extra_params: dict = {}
+            if CLASSIFICATION_MODEL.startswith(("o", "gpt-5")):
+                extra_params["max_completion_tokens"] = 50
+            else:
+                extra_params["max_tokens"] = 50
+                extra_params["temperature"] = 0.3
             response = state.openai_client.chat.completions.create(
                 model=CLASSIFICATION_MODEL,
                 messages=[
@@ -799,8 +824,7 @@ Return JSON with: {"type": "<type>", "confidence": <0.0-1.0>}"""
                     {"role": "user", "content": content[:1000]},  # Limit to 1000 chars
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.3,
-                **token_param,
+                **extra_params,
             )
 
             result = json.loads(response.choices[0].message.content)
@@ -1180,13 +1204,15 @@ def init_embedding_provider() -> None:
 
     Priority order:
     1. OpenAI API (if OPENAI_API_KEY is set)
-    2. Local fastembed model (no API key needed)
-    3. Placeholder hash-based embeddings (fallback)
+    2. Ollama local server (if configured)
+    3. Local fastembed model (no API key needed)
+    4. Placeholder hash-based embeddings (fallback)
 
     Can be controlled via EMBEDDING_PROVIDER env var:
-    - "auto" (default): Try OpenAI, then fastembed, then placeholder
+    - "auto" (default): Try OpenAI, then Ollama, then fastembed, then placeholder
     - "openai": Use OpenAI only, fail if unavailable
     - "local": Use fastembed only, fail if unavailable
+    - "ollama": Use Ollama only, fail if unavailable
     - "placeholder": Use placeholder embeddings
     """
     if state.embedding_provider is not None:
@@ -1225,6 +1251,29 @@ def init_embedding_provider() -> None:
         except Exception as e:
             raise RuntimeError(f"Failed to initialize local fastembed provider: {e}") from e
 
+    elif provider_config == "ollama":
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        model = os.getenv("OLLAMA_MODEL", "nomic-embed-text")
+        try:
+            timeout = float(os.getenv("OLLAMA_TIMEOUT", "30"))
+            max_retries = int(os.getenv("OLLAMA_MAX_RETRIES", "2"))
+        except ValueError as ve:
+            raise RuntimeError(f"Invalid OLLAMA_TIMEOUT or OLLAMA_MAX_RETRIES value: {ve}") from ve
+        try:
+            from automem.embedding.ollama import OllamaEmbeddingProvider
+
+            state.embedding_provider = OllamaEmbeddingProvider(
+                base_url=base_url,
+                model=model,
+                dimension=vector_size,
+                timeout=timeout,
+                max_retries=max_retries,
+            )
+            logger.info("Embedding provider: %s", state.embedding_provider.provider_name())
+            return
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize Ollama provider: {e}") from e
+
     elif provider_config == "placeholder":
         from automem.embedding.placeholder import PlaceholderEmbeddingProvider
 
@@ -1232,7 +1281,7 @@ def init_embedding_provider() -> None:
         logger.info("Embedding provider: %s", state.embedding_provider.provider_name())
         return
 
-    # Auto-selection: Try OpenAI → fastembed → placeholder
+    # Auto-selection: Try OpenAI → Ollama (if configured) → fastembed → placeholder
     if provider_config == "auto":
         # Try OpenAI first
         api_key = os.getenv("OPENAI_API_KEY")
@@ -1251,6 +1300,38 @@ def init_embedding_provider() -> None:
             except Exception as e:
                 logger.warning(
                     "Failed to initialize OpenAI provider, trying local model: %s", str(e)
+                )
+
+        ollama_base_url = os.getenv("OLLAMA_BASE_URL")
+        ollama_model = os.getenv("OLLAMA_MODEL")
+        if ollama_base_url or ollama_model:
+            try:
+                from automem.embedding.ollama import OllamaEmbeddingProvider
+
+                base_url = ollama_base_url or "http://localhost:11434"
+                model = ollama_model or "nomic-embed-text"
+                try:
+                    timeout = float(os.getenv("OLLAMA_TIMEOUT", "30"))
+                    max_retries = int(os.getenv("OLLAMA_MAX_RETRIES", "2"))
+                except ValueError:
+                    logger.warning("Invalid OLLAMA_TIMEOUT or OLLAMA_MAX_RETRIES, using defaults")
+                    timeout = 30.0
+                    max_retries = 2
+                state.embedding_provider = OllamaEmbeddingProvider(
+                    base_url=base_url,
+                    model=model,
+                    dimension=vector_size,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                )
+                logger.info(
+                    "Embedding provider (auto-selected): %s",
+                    state.embedding_provider.provider_name(),
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    "Failed to initialize Ollama provider, trying local model: %s", str(e)
                 )
 
         # Try local fastembed
@@ -1281,7 +1362,7 @@ def init_embedding_provider() -> None:
     # Invalid config
     raise ValueError(
         f"Invalid EMBEDDING_PROVIDER={provider_config}. "
-        f"Valid options: auto, openai, local, placeholder"
+        f"Valid options: auto, openai, local, ollama, placeholder"
     )
 
 
@@ -2217,6 +2298,11 @@ def enrich_memory(memory_id: str, *, forced: bool = False) -> bool:
     return True
 
 
+def _temporal_cutoff() -> str:
+    """Return an ISO timestamp 7 days ago to bound temporal queries."""
+    return (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+
 def find_temporal_relationships(graph: Any, memory_id: str, limit: int = 5) -> int:
     """Find and create temporal relationships with recent memories."""
     created = 0
@@ -2224,16 +2310,19 @@ def find_temporal_relationships(graph: Any, memory_id: str, limit: int = 5) -> i
         result = graph.query(
             """
             MATCH (m1:Memory {id: $id})
+            WITH m1, m1.timestamp AS ts
+            WHERE ts IS NOT NULL
             MATCH (m2:Memory)
             WHERE m2.id <> $id
                 AND m2.timestamp IS NOT NULL
-                AND m1.timestamp IS NOT NULL
-                AND m2.timestamp < m1.timestamp
+                AND m2.timestamp < ts
+                AND m2.timestamp > $cutoff
             RETURN m2.id
             ORDER BY m2.timestamp DESC
             LIMIT $limit
             """,
-            {"id": memory_id, "limit": limit},
+            {"id": memory_id, "limit": limit, "cutoff": _temporal_cutoff()},
+            timeout=5000,
         )
 
         timestamp = utc_now()
