@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional, Tuple
 
 
 def utc_now() -> str:
@@ -9,9 +8,21 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
-    """Parse ISO strings into timezone-aware datetimes (UTC fallback for naive)."""
-    if not value:
+def _parse_iso_datetime(value: str | int | float | None) -> datetime | None:
+    """Parse ISO strings or unix timestamps into timezone-aware datetimes (UTC fallback for naive)."""
+    if value is None:
+        return None
+
+    # Handle numeric timestamps (unix epoch)
+    # Guard against bool values since bool is a subclass of int in Python
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            return None
+
+    # Handle string timestamps
+    if not isinstance(value, str):
         return None
 
     candidate = value.strip()
@@ -31,7 +42,7 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def _normalize_timestamp(raw: Any) -> str:
+def _normalize_timestamp(raw: str) -> str:
     """Validate and normalise an incoming timestamp string to UTC ISO format."""
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError("Timestamp must be a non-empty ISO formatted string")
@@ -45,10 +56,13 @@ def _normalize_timestamp(raw: Any) -> str:
     except ValueError as exc:  # pragma: no cover - validation path
         raise ValueError("Invalid ISO timestamp") from exc
 
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
     return parsed.astimezone(timezone.utc).isoformat()
 
 
-def _parse_time_expression(expression: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+def _parse_time_expression(expression: str | None) -> tuple[str | None, str | None]:
     if not expression:
         return None, None
 

@@ -1,5 +1,5 @@
 # Makefile - Development commands
-.PHONY: help install dev test fmt lint test-integration test-live test-locomo test-locomo-live clean logs deploy
+.PHONY: help install dev test fmt lint test-integration test-live test-locomo test-locomo-live test-longmemeval test-longmemeval-live clean logs deploy
 
 # Default target
 help:
@@ -19,8 +19,10 @@ help:
 	@echo "  make clean      - Clean up containers and volumes"
 	@echo ""
 	@echo "Benchmarks:"
-	@echo "  make test-locomo      - Run LoCoMo benchmark (local)"
-	@echo "  make test-locomo-live - Run LoCoMo benchmark (Railway)"
+	@echo "  make test-locomo          - Run LoCoMo benchmark (local)"
+	@echo "  make test-locomo-live     - Run LoCoMo benchmark (Railway)"
+	@echo "  make test-longmemeval     - Run LongMemEval benchmark (local)"
+	@echo "  make test-longmemeval-live - Run LongMemEval benchmark (Railway)"
 	@echo ""
 	@echo "Deployment:"
 	@echo "  make deploy     - Deploy to Railway"
@@ -47,7 +49,7 @@ test:
 		echo "🔧 ./venv/bin/pytest not found; bootstrapping with 'make install'..."; \
 		$(MAKE) install; \
 	fi
-	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ./venv/bin/pytest -rs
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ./venv/bin/pytest -rs -m unit
 
 # Format code
 fmt:
@@ -60,15 +62,15 @@ lint:
 	@echo "🔍 Linting (flake8) ..."
 	./venv/bin/flake8 .
 
-# Run all tests including integration tests
+# Run integration tests (requires Docker services)
 test-integration:
-	@echo "🧪 Running all tests including integration tests..."
+	@echo "🧪 Running integration tests..."
 	@echo "🐳 Starting Docker services..."
 	@AUTOMEM_API_TOKEN=test-token ADMIN_API_TOKEN=test-admin-token docker compose up -d
 	@echo "⏳ Waiting for services to be ready..."
 	@sleep 5
 	@echo "🧪 Running tests..."
-	@AUTOMEM_RUN_INTEGRATION_TESTS=1 AUTOMEM_TEST_API_TOKEN=test-token AUTOMEM_TEST_ADMIN_TOKEN=test-admin-token PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ./venv/bin/pytest -rs
+	@AUTOMEM_RUN_INTEGRATION_TESTS=1 AUTOMEM_TEST_API_TOKEN=test-token AUTOMEM_TEST_ADMIN_TOKEN=test-admin-token PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ./venv/bin/pytest -rs -m integration
 
 # Run integration tests against live Railway server
 test-live:
@@ -100,3 +102,32 @@ test-locomo:
 # Run LoCoMo benchmark (Railway)
 test-locomo-live:
 	@./test-locomo-benchmark.sh --live
+
+# Run LongMemEval benchmark (local)
+test-longmemeval:
+	@./test-longmemeval-benchmark.sh
+
+# Run LongMemEval benchmark (Railway)
+test-longmemeval-live:
+	@./test-longmemeval-benchmark.sh --live
+
+# Recall Quality Lab
+lab-clone:
+	@echo "🔬 Cloning production data to local Docker..."
+	@bash scripts/lab/clone_production.sh
+
+lab-queries:
+	@echo "🔬 Generating test queries from local data..."
+	@python3 scripts/lab/create_test_queries.py
+
+lab-test:
+	@echo "🔬 Running recall quality test..."
+	@python3 scripts/lab/run_recall_test.py --config $(or $(CONFIG),baseline)
+
+lab-compare:
+	@echo "🔬 Comparing configs: $(BASELINE) vs $(CONFIG)..."
+	@python3 scripts/lab/run_recall_test.py --config $(CONFIG) --compare $(or $(BASELINE),baseline)
+
+lab-sweep:
+	@echo "🔬 Sweeping $(PARAM)..."
+	@python3 scripts/lab/run_recall_test.py --sweep $(PARAM) $(VALUES)

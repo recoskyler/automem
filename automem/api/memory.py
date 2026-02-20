@@ -6,6 +6,7 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from flask import Blueprint, abort, jsonify, request
+from flask.typing import ResponseReturnValue
 
 from automem.config import (
     CLASSIFICATION_MODEL,
@@ -15,6 +16,14 @@ from automem.config import (
     MEMORY_SUMMARY_TARGET_LENGTH,
 )
 from automem.utils.text import should_summarize_content, summarize_content
+
+
+def _validate_memory_id(memory_id: str) -> None:
+    """Abort with 400 if *memory_id* is not a valid UUID."""
+    try:
+        uuid.UUID(memory_id)
+    except ValueError:
+        abort(400, description="memory_id must be a valid UUID")
 
 
 def create_memory_blueprint(
@@ -348,8 +357,42 @@ def create_memory_blueprint_full(
         )
         return jsonify(response), 201
 
+    @bp.route("/memory/<memory_id>", methods=["GET"])
+    def get(memory_id: str) -> ResponseReturnValue:
+        _validate_memory_id(memory_id)
+
+        graph = get_memory_graph()
+        if graph is None:
+            abort(503, description="Graph database unavailable")
+
+        try:
+            result = graph.query(
+                "MATCH (m:Memory {id: $id}) RETURN m",
+                {"id": memory_id},
+            )
+        except Exception:
+            logger.exception("Failed to fetch memory %s", memory_id)
+            abort(500, description="Failed to fetch memory")
+
+        if not getattr(result, "result_set", None):
+            abort(404, description="Memory not found")
+
+        node = serialize_node(result.result_set[0][0])
+        # Parse metadata field for consistency with by_tag endpoint
+        node["metadata"] = parse_metadata_field(node.get("metadata"))
+
+        # Update last_accessed timestamp for consistency with by_tag endpoint
+        if on_access:
+            try:
+                on_access([memory_id])
+            except Exception:
+                logger.exception("on_access failed for memory %s", memory_id)
+
+        return jsonify({"status": "success", "memory": node})
+
     @bp.route("/memory/<memory_id>", methods=["PATCH"])
     def update(memory_id: str) -> Any:
+        _validate_memory_id(memory_id)
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             abort(400, description="JSON body is required")
@@ -475,6 +518,7 @@ def create_memory_blueprint_full(
 
     @bp.route("/memory/<memory_id>", methods=["DELETE"])
     def delete(memory_id: str) -> Any:
+        _validate_memory_id(memory_id)
         graph = get_memory_graph()
         if graph is None:
             abort(503, description="FalkorDB is unavailable")
@@ -544,10 +588,18 @@ def create_memory_blueprint_full(
         if on_access and memories:
             accessed_ids = [str(m.get("id")) for m in memories if m.get("id")]
             if accessed_ids:
-                on_access(accessed_ids)
+                try:
+                    on_access(accessed_ids)
+                except Exception:
+                    logger.exception("on_access failed for %d memories", len(accessed_ids))
 
         return jsonify(
-            {"status": "success", "tags": tags, "count": len(memories), "memories": memories}
+            {
+                "status": "success",
+                "tags": tags,
+                "count": len(memories),
+                "memories": memories,
+            }
         )
 
     @bp.route("/associate", methods=["POST"])
@@ -563,10 +615,15 @@ def create_memory_blueprint_full(
 
         if not memory1_id or not memory2_id:
             abort(400, description="'memory1_id' and 'memory2_id' are required")
+        _validate_memory_id(memory1_id)
+        _validate_memory_id(memory2_id)
         if memory1_id == memory2_id:
             abort(400, description="Cannot associate a memory with itself")
         if relation_type not in set(allowed_relations):
-            abort(400, description=f"Relation type must be one of {sorted(allowed_relations)}")
+            abort(
+                400,
+                description=f"Relation type must be one of {sorted(allowed_relations)}",
+            )
 
         graph = get_memory_graph()
         if graph is None:

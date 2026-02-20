@@ -152,6 +152,7 @@ from automem.config import (
     ENRICHMENT_SPACY_MODEL,
     FALKORDB_PORT,
     GRAPH_NAME,
+    JIT_ENRICHMENT_ENABLED,
     MEMORY_TYPES,
     RECALL_EXPANSION_LIMIT,
     RECALL_RELATION_LIMIT,
@@ -1203,13 +1204,15 @@ def init_embedding_provider() -> None:
     """Initialize embedding provider with auto-selection fallback.
 
     Priority order:
-    1. OpenAI API (if OPENAI_API_KEY is set)
-    2. Ollama local server (if configured)
-    3. Local fastembed model (no API key needed)
-    4. Placeholder hash-based embeddings (fallback)
+    1. Voyage API (if VOYAGE_API_KEY is set)
+    2. OpenAI API (if OPENAI_API_KEY is set)
+    3. Ollama local server (if configured)
+    4. Local fastembed model (no API key needed)
+    5. Placeholder hash-based embeddings (fallback)
 
     Can be controlled via EMBEDDING_PROVIDER env var:
-    - "auto" (default): Try OpenAI, then Ollama, then fastembed, then placeholder
+    - "auto" (default): Try Voyage, then OpenAI, then Ollama, then fastembed, then placeholder
+    - "voyage": Use Voyage only, fail if unavailable
     - "openai": Use OpenAI only, fail if unavailable
     - "local": Use fastembed only, fail if unavailable
     - "ollama": Use Ollama only, fail if unavailable
@@ -1226,15 +1229,35 @@ def init_embedding_provider() -> None:
     vector_size = state.effective_vector_size
 
     # Explicit provider selection
-    if provider_config == "openai":
+    if provider_config == "voyage":
+        api_key = os.getenv("VOYAGE_API_KEY")
+        if not api_key:
+            raise RuntimeError("EMBEDDING_PROVIDER=voyage but VOYAGE_API_KEY not set")
+        try:
+            from automem.embedding.voyage import VoyageEmbeddingProvider
+
+            voyage_model = os.getenv("VOYAGE_MODEL", "voyage-4")
+            state.embedding_provider = VoyageEmbeddingProvider(
+                api_key=api_key, model=voyage_model, dimension=vector_size
+            )
+            logger.info("Embedding provider: %s", state.embedding_provider.provider_name())
+            return
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize Voyage provider: {e}") from e
+
+    elif provider_config == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("EMBEDDING_PROVIDER=openai but OPENAI_API_KEY not set")
+        openai_base_url = (os.getenv("OPENAI_BASE_URL") or "").strip() or None
         try:
             from automem.embedding.openai import OpenAIEmbeddingProvider
 
             state.embedding_provider = OpenAIEmbeddingProvider(
-                api_key=api_key, model=EMBEDDING_MODEL, dimension=vector_size
+                api_key=api_key,
+                model=EMBEDDING_MODEL,
+                dimension=vector_size,
+                base_url=openai_base_url,
             )
             logger.info("Embedding provider: %s", state.embedding_provider.provider_name())
             return
@@ -1281,16 +1304,38 @@ def init_embedding_provider() -> None:
         logger.info("Embedding provider: %s", state.embedding_provider.provider_name())
         return
 
-    # Auto-selection: Try OpenAI → Ollama (if configured) → fastembed → placeholder
+    # Auto-selection: Try Voyage → OpenAI → Ollama → fastembed → placeholder
     if provider_config == "auto":
-        # Try OpenAI first
+        # Try Voyage first (preferred)
+        voyage_key = os.getenv("VOYAGE_API_KEY")
+        if voyage_key:
+            try:
+                from automem.embedding.voyage import VoyageEmbeddingProvider
+
+                voyage_model = os.getenv("VOYAGE_MODEL", "voyage-4")
+                state.embedding_provider = VoyageEmbeddingProvider(
+                    api_key=voyage_key, model=voyage_model, dimension=vector_size
+                )
+                logger.info(
+                    "Embedding provider (auto-selected): %s",
+                    state.embedding_provider.provider_name(),
+                )
+                return
+            except Exception as e:
+                logger.warning("Failed to initialize Voyage provider, trying OpenAI: %s", str(e))
+
+        # Try OpenAI
         api_key = os.getenv("OPENAI_API_KEY")
         if api_key:
             try:
                 from automem.embedding.openai import OpenAIEmbeddingProvider
 
+                openai_base_url = (os.getenv("OPENAI_BASE_URL") or "").strip() or None
                 state.embedding_provider = OpenAIEmbeddingProvider(
-                    api_key=api_key, model=EMBEDDING_MODEL, dimension=vector_size
+                    api_key=api_key,
+                    model=EMBEDDING_MODEL,
+                    dimension=vector_size,
+                    base_url=openai_base_url,
                 )
                 logger.info(
                     "Embedding provider (auto-selected): %s",
@@ -1352,7 +1397,7 @@ def init_embedding_provider() -> None:
         state.embedding_provider = PlaceholderEmbeddingProvider(dimension=vector_size)
         logger.warning(
             "Using placeholder embeddings (no semantic search). "
-            "Install fastembed or set OPENAI_API_KEY for semantic embeddings."
+            "Install fastembed or set VOYAGE_API_KEY/OPENAI_API_KEY for semantic embeddings."
         )
         logger.info(
             "Embedding provider (auto-selected): %s", state.embedding_provider.provider_name()
@@ -1362,7 +1407,7 @@ def init_embedding_provider() -> None:
     # Invalid config
     raise ValueError(
         f"Invalid EMBEDDING_PROVIDER={provider_config}. "
-        f"Valid options: auto, openai, local, ollama, placeholder"
+        f"Valid options: auto, voyage, openai, local, ollama, placeholder"
     )
 
 
@@ -2039,6 +2084,7 @@ def _store_embedding_in_qdrant(memory_id: str, content: str, embedding: List[flo
                         "updated_at": properties.get("updated_at", utc_now()),
                         "last_accessed": properties.get("last_accessed", utc_now()),
                         "metadata": json.loads(properties.get("metadata", "{}")),
+                        "relevance_score": properties.get("relevance_score"),
                     },
                 )
             ],
@@ -2162,6 +2208,138 @@ def _run_sync_check() -> None:
 
     except Exception:
         logger.exception("Sync check failed")
+
+
+def jit_enrich_lightweight(memory_id: str, properties: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Run lightweight JIT enrichment inline during recall.
+
+    Extracts entities, generates summary, and updates tags — the cheap parts
+    of enrichment (~50ms).  Does NOT set ``processed=true`` so the async worker
+    still runs the expensive operations (temporal links, patterns, neighbors).
+
+    Returns the updated *properties* dict on success, or ``None`` on failure.
+    """
+    graph = get_memory_graph()
+    if graph is None:
+        return None
+
+    # Check canonical enrichment state to avoid re-enriching Qdrant-sourced memories
+    try:
+        check = graph.query(
+            "MATCH (m:Memory {id: $id}) RETURN m.enriched, m.processed",
+            {"id": memory_id},
+        )
+        if getattr(check, "result_set", None):
+            row = check.result_set[0]
+            if row[0] or row[1]:  # already enriched or processed — skip
+                logger.debug("JIT skipped for %s (already enriched/processed)", memory_id)
+                return None
+    except Exception as exc:  # noqa: BLE001 - best-effort guard, proceed if check fails
+        logger.debug("JIT state-check failed for %s: %s", memory_id, exc)
+
+    content = properties.get("content", "") or ""
+    if not content:
+        return None
+
+    # --- cheap enrichment steps -------------------------------------------
+    entities = extract_entities(content)
+
+    tags = list(dict.fromkeys(_normalize_tag_list(properties.get("tags"))))
+    entity_tags: Set[str] = set()
+
+    metadata_raw = properties.get("metadata")
+    metadata = _parse_metadata_field(metadata_raw) or {}
+    if not isinstance(metadata, dict):
+        metadata = {"_raw_metadata": metadata}
+
+    if entities:
+        entities_section = metadata.setdefault("entities", {})
+        if not isinstance(entities_section, dict):
+            entities_section = {}
+        for category, values in entities.items():
+            if not values:
+                continue
+            entities_section[category] = sorted(values)
+            for value in values:
+                slug = _slugify(value)
+                if slug:
+                    entity_tags.add(f"entity:{category}:{slug}")
+        metadata["entities"] = entities_section
+
+    if entity_tags:
+        tags = list(dict.fromkeys(tags + sorted(entity_tags)))
+
+    tag_prefixes = _compute_tag_prefixes(tags)
+
+    summary = None
+    if ENRICHMENT_ENABLE_SUMMARIES:
+        summary = generate_summary(content, properties.get("summary"))
+    else:
+        summary = properties.get("summary")
+
+    enriched_at = utc_now()
+
+    # Record that JIT ran (the full worker will overwrite this later)
+    enrichment_meta = metadata.setdefault("enrichment", {})
+    if not isinstance(enrichment_meta, dict):
+        enrichment_meta = {}
+    enrichment_meta["jit"] = True
+    enrichment_meta["jit_at"] = enriched_at
+    metadata["enrichment"] = enrichment_meta
+
+    # --- persist to graph (do NOT set processed=true) ---------------------
+    update_payload = {
+        "id": memory_id,
+        "metadata": json.dumps(metadata, default=str),
+        "tags": tags,
+        "tag_prefixes": tag_prefixes,
+        "summary": summary,
+        "enriched_at": enriched_at,
+    }
+    try:
+        graph.query(
+            """
+            MATCH (m:Memory {id: $id})
+            SET m.metadata = $metadata,
+                m.tags = $tags,
+                m.tag_prefixes = $tag_prefixes,
+                m.summary = $summary,
+                m.enriched = true,
+                m.enriched_at = $enriched_at
+            """,
+            update_payload,
+        )
+    except Exception:
+        logger.exception("JIT enrichment graph update failed for %s", memory_id)
+        return None
+
+    # --- sync to Qdrant payload -------------------------------------------
+    qdrant_client = get_qdrant_client()
+    if qdrant_client is not None:
+        try:
+            qdrant_client.set_payload(
+                collection_name=COLLECTION_NAME,
+                points=[memory_id],
+                payload={
+                    "tags": tags,
+                    "tag_prefixes": tag_prefixes,
+                    "metadata": metadata,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - Qdrant client raises multiple exception types
+            logger.debug("JIT Qdrant payload sync skipped for %s: %s", memory_id, exc)
+
+    # --- return updated properties for the current recall response --------
+    updated = dict(properties)
+    updated["tags"] = tags
+    updated["tag_prefixes"] = tag_prefixes
+    updated["metadata"] = metadata
+    updated["summary"] = summary
+    updated["enriched"] = True
+    updated["enriched_at"] = enriched_at
+
+    logger.debug("JIT-enriched memory %s (entities=%s)", memory_id, bool(entities))
+    return updated
 
 
 def enrich_memory(memory_id: str, *, forced: bool = False) -> bool:
@@ -3739,6 +3917,7 @@ recall_bp = create_recall_blueprint(
     _serialize_node,
     _summarize_relation_node,
     update_last_accessed,
+    jit_enrich_fn=jit_enrich_lightweight if JIT_ENRICHMENT_ENABLED else None,
 )
 
 memory_bp = create_memory_blueprint_full(
