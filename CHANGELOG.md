@@ -2,6 +2,52 @@
 
 All notable changes to AutoMem will be documented in this file.
 
+## [0.13.0](https://github.com/verygoodplugins/automem/compare/v0.12.0...v0.13.0) (2026-03-02)
+
+
+### Features
+
+* **bench:** benchmark testing infrastructure for rapid iteration ([#97](https://github.com/verygoodplugins/automem/issues/97)) ([80a6f93](https://github.com/verygoodplugins/automem/commit/80a6f93a783182ddd9efb9f9f17d73cb8d6f3702))
+* **recall:** add min_score threshold and adaptive floor filtering ([#73](https://github.com/verygoodplugins/automem/issues/73)) ([#101](https://github.com/verygoodplugins/automem/issues/101)) ([8df3c08](https://github.com/verygoodplugins/automem/commit/8df3c08fc2dcefc8b848a42698af1d2ebec2e680))
+* **viewer:** add standalone graph-viewer runtime files ([5bcb6db](https://github.com/verygoodplugins/automem/commit/5bcb6dba3d9045c6cf67b6a2055cffc98178fcbc))
+* **viewer:** consolidate stable core and split-ready compatibility ([#94](https://github.com/verygoodplugins/automem/issues/94)) ([958da72](https://github.com/verygoodplugins/automem/commit/958da726763bcae4ff616d2bd7bc7c8d59dec35e))
+* **viewer:** externalize visualizer with /viewer compatibility routes ([29bafcf](https://github.com/verygoodplugins/automem/commit/29bafcfb4816e2eb9de0e74619e7b3b8c7bac930))
+* **viewer:** merge visualizer stable core branch ([96b27bf](https://github.com/verygoodplugins/automem/commit/96b27bf0d7a878ab16695cf340b7bbfe13bcfafd))
+
+
+### Bug Fixes
+
+* FalkorDB data not persisting across restarts ([`#99`](https://github.com/verygoodplugins/automem/issues/99)) ([3bbc834](https://github.com/verygoodplugins/automem/commit/3bbc83441124884d9a89b34c32d0373c79eb7d37), [8490d36](https://github.com/verygoodplugins/automem/commit/8490d3641cafa97246edfb3a913ce200ef26478d))
+* **mcp-sse:** sync tool schemas for SSE/MCP parity ([#104](https://github.com/verygoodplugins/automem/issues/104)) ([d99b86d](https://github.com/verygoodplugins/automem/commit/d99b86d9ed2a2612abe5770bcbf729493d7c7bf7))
+
+
+### Documentation
+
+* **bench:** add PR [#73](https://github.com/verygoodplugins/automem/issues/73), [#80](https://github.com/verygoodplugins/automem/issues/80), and [#87](https://github.com/verygoodplugins/automem/issues/87) experiment results ([#103](https://github.com/verygoodplugins/automem/issues/103)) ([8533fac](https://github.com/verygoodplugins/automem/commit/8533face4dc7319392e1f4b8890f9e24c66ae916))
+
+## [0.12.0](https://github.com/verygoodplugins/automem/compare/v0.11.0...v0.12.0) (2026-02-20)
+
+
+### Features
+
+* add LongMemEval benchmark harness (ICLR 2025) ([#83](https://github.com/verygoodplugins/automem/issues/83)) ([8f51895](https://github.com/verygoodplugins/automem/commit/8f518959b789f56e898e73bb1f2535413f4b5f10))
+* just-in-time enrichment on recall ([#86](https://github.com/verygoodplugins/automem/issues/86)) ([#88](https://github.com/verygoodplugins/automem/issues/88)) ([743ab6b](https://github.com/verygoodplugins/automem/commit/743ab6bd52aeba28681964cb10118d2fa54b8767))
+* **lab:** add Recall Quality Lab for data-driven recall optimization ([d53dfdd](https://github.com/verygoodplugins/automem/commit/d53dfdd7a365b9bf99a5001550c1fb4ff8d851e4))
+* **lab:** Recall Quality Lab + fix relevance_score Qdrant sync ([#81](https://github.com/verygoodplugins/automem/issues/81)) ([ba1308a](https://github.com/verygoodplugins/automem/commit/ba1308a340cd6fb796e3b88cf4a9415386eaf5b3))
+
+
+### Bug Fixes
+
+* code quality improvements from CodeRabbit review ([#85](https://github.com/verygoodplugins/automem/issues/85)) ([4c81f0f](https://github.com/verygoodplugins/automem/commit/4c81f0f7ea3c064c8087bdf2037313c8cd6dd9c1))
+* **lab:** address CodeRabbit review — type hints, f-strings, validation ([5fee1e8](https://github.com/verygoodplugins/automem/commit/5fee1e8484e00ad7933d28ec78c24503d7c03219))
+* **lab:** address CodeRabbit review findings ([c121341](https://github.com/verygoodplugins/automem/commit/c121341e6106c5c3a6da5162df575b8f0b39f510))
+* **recall:** sync relevance_score to Qdrant payload for vector search ([55e381b](https://github.com/verygoodplugins/automem/commit/55e381b76265c7bb4e88c35a84e251b1de012dbf))
+
+
+### Documentation
+
+* Update environment variables ([08e6126](https://github.com/verygoodplugins/automem/commit/08e612695395cf623f50ecc5697103778332b554))
+
 ## [0.11.0](https://github.com/verygoodplugins/automem/compare/v0.10.1...v0.11.0) (2026-02-16)
 
 

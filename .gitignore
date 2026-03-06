@@ -27,6 +27,7 @@ tests/benchmarks/longmemeval/results/
 # Node.js dependencies
 /mcp-sse-server/node_modules/
 node_modules/
+
 # Experiment results (promote notable runs to tests/benchmarks/results/)
 /tests/benchmarks/experiments/results_*/
 
@@ -34,3 +35,9 @@ node_modules/
 /lab/snapshots/
 /lab/results/
 /lab/test_sets/
+
+# Benchmark overrides and snapshots
+.env.bench
+/benchmarks/snapshots/
+/benchmarks/results/
+benchmarks/baselines/locomo_baseline.json
